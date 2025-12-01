@@ -1,0 +1,4 @@
+timestamp,precision,batch_size,seq_length,num_samples,accuracy_%,latency_s,throughput_samples_s,avg_power_w,energy_j,energy_per_sample_mj,notes
+2025-12-01T19:34:36.654188,FP32,8,128,50,86.0,0.1158,431.87,,,,Baseline - fine-tuned DistilBERT
+2025-12-01T19:34:36.654300,FP16,8,128,50,0.0,0.0,,,,,Waiting for Thomas - FP16 model
+2025-12-01T19:34:36.654394,INT8,8,128,50,0.0,0.0,,,,,Waiting for Thomas - INT8 model

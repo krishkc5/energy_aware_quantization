@@ -1,0 +1,1 @@
+timestamp,precision,batch_size,seq_length,num_samples,accuracy_%,latency_s,throughput_samples_s,avg_power_w,energy_j,energy_per_sample_mj,notes

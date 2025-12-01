@@ -1,0 +1,44 @@
+[
+  {
+    "timestamp": "2025-12-01T19:34:36.654188",
+    "precision": "FP32",
+    "batch_size": 8,
+    "seq_length": 128,
+    "num_samples": 50,
+    "accuracy_%": 86.0,
+    "latency_s": 0.1158,
+    "throughput_samples_s": 431.87,
+    "avg_power_w": null,
+    "energy_j": null,
+    "energy_per_sample_mj": null,
+    "notes": "Baseline - fine-tuned DistilBERT"
+  },
+  {
+    "timestamp": "2025-12-01T19:34:36.654300",
+    "precision": "FP16",
+    "batch_size": 8,
+    "seq_length": 128,
+    "num_samples": 50,
+    "accuracy_%": 0.0,
+    "latency_s": 0.0,
+    "throughput_samples_s": null,
+    "avg_power_w": null,
+    "energy_j": null,
+    "energy_per_sample_mj": null,
+    "notes": "Waiting for Thomas - FP16 model"
+  },
+  {
+    "timestamp": "2025-12-01T19:34:36.654394",
+    "precision": "INT8",
+    "batch_size": 8,
+    "seq_length": 128,
+    "num_samples": 50,
+    "accuracy_%": 0.0,
+    "latency_s": 0.0,
+    "throughput_samples_s": null,
+    "avg_power_w": null,
+    "energy_j": null,
+    "energy_per_sample_mj": null,
+    "notes": "Waiting for Thomas - INT8 model"
+  }
+]
