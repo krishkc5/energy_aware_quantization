@@ -1,15 +1,54 @@
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Jupyter
 .ipynb_checkpoints/
+*.ipynb_checkpoints
 
-# model weights and datasets
-datasets/*.pt
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Model weights (keep structure, ignore weights)
 models/*.pt
+models/*.bin
+models/*.safetensors
 
-# logs
+# Datasets - keep .pt files but ignore if too large
+# datasets/*.pt  # Uncomment if datasets are too large for git
+
+# Results (keep directory structure)
+results/*.csv
+results/*.json
+results/*/*.csv
+results/*/*.json
+!results/README.md
+!results/fp32/README.md
+!results/fp16/README.md
+!results/int8/README.md
+
+# Logs
 *.log
 logs/
+*.out
 
-# results
-results/
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
