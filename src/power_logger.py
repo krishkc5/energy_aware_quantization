@@ -109,7 +109,10 @@ class PowerLogger:
         # Convert milliseconds to seconds for the -l flag
         loop_interval_seconds = self.sample_interval_ms / 1000.0
 
+        # Use stdbuf to force line-buffered output from nvidia-smi
+        # This prevents output buffering that causes sample loss
         cmd = [
+            "stdbuf", "-oL",  # Force line-buffered output
             "nvidia-smi",
             "--query-gpu=power.draw",
             "--format=csv,noheader,nounits",
@@ -150,7 +153,7 @@ class PowerLogger:
         Background thread that reads power samples from nvidia-smi.
 
         This runs continuously until stop() is called.
-        Reads in binary mode to avoid buffering issues.
+        Uses iter() with readline for non-blocking reads.
         """
         if self.process is None or self.process.stdout is None:
             if self.verbose:
@@ -158,41 +161,33 @@ class PowerLogger:
             return
 
         try:
-            buffer = b""
-            while self.is_running:
-                # Read one byte at a time to avoid blocking
-                chunk = self.process.stdout.read(1)
-
-                if not chunk:
-                    # Process ended
+            # Use iter() to read lines as they become available
+            # This is more efficient than byte-by-byte reading
+            for line_bytes in iter(self.process.stdout.readline, b''):
+                if not self.is_running:
                     break
 
-                buffer += chunk
+                line = line_bytes.decode('utf-8', errors='ignore').strip()
 
-                # Check for newline
-                if chunk == b'\n':
-                    line = buffer.decode('utf-8', errors='ignore').strip()
-                    buffer = b""  # Reset buffer
+                if not line:
+                    continue
 
-                    if not line:
-                        continue
+                try:
+                    power = float(line)
+                    with self._lock:
+                        self.samples.append(power)
 
-                    try:
-                        power = float(line)
-                        with self._lock:
-                            self.samples.append(power)
+                    if self.verbose and len(self.samples) % 10 == 0:
+                        print(f"  Power samples collected: {len(self.samples)}")
 
-                        if self.verbose and len(self.samples) % 10 == 0:
-                            print(f"  Power samples collected: {len(self.samples)}")
-
-                    except ValueError:
-                        # Check if this is an error message
-                        if "error" in line.lower() or "warning" in line.lower():
-                            if self.verbose:
-                                print(f"  nvidia-smi message: {line}")
-                        elif self.verbose:
-                            print(f"  Warning: Could not parse power value: {line}")
-                        continue
+                except ValueError:
+                    # Check if this is an error message
+                    if "error" in line.lower() or "warning" in line.lower():
+                        if self.verbose:
+                            print(f"  nvidia-smi message: {line}")
+                    elif self.verbose:
+                        print(f"  Warning: Could not parse power value: {line}")
+                    continue
 
         except Exception as e:
             if self.verbose:
