@@ -25,6 +25,63 @@ class ModelConfig:
     num_labels: int = 2
 
 
+def _apply_int8_quantization_cuda(model: nn.Module, verbose: bool = True) -> None:
+    """
+    Apply INT8-like quantization for CUDA by quantizing weights to INT8 range.
+
+    This uses symmetric per-tensor quantization:
+    - Quantize: Q = round(R / scale) where scale = max(abs(R)) / 127
+    - Dequantize: R' = Q * scale
+
+    The weights are stored as FP32/FP16 but quantized to INT8 precision.
+    This is not true INT8 compute (which requires special kernels) but
+    simulates the accuracy/precision loss of INT8 quantization.
+
+    Args:
+        model: Model to quantize (must be on CUDA)
+        verbose: Whether to print quantization info
+    """
+    num_quantized = 0
+
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            # Quantize weight
+            with torch.no_grad():
+                weight = module.weight.data
+
+                # Symmetric per-tensor quantization
+                # Scale = max_abs_value / 127 (INT8 max positive value)
+                scale = weight.abs().max() / 127.0
+
+                if scale > 0:
+                    # Quantize: divide by scale, round, clamp to INT8 range
+                    weight_q = torch.round(weight / scale)
+                    weight_q = torch.clamp(weight_q, -128, 127)
+
+                    # Dequantize: multiply back by scale
+                    weight_dequant = weight_q * scale
+
+                    # Replace original weight with quantized version
+                    module.weight.data = weight_dequant
+
+                # Quantize bias if it exists
+                if module.bias is not None:
+                    bias = module.bias.data
+                    scale_bias = bias.abs().max() / 127.0
+
+                    if scale_bias > 0:
+                        bias_q = torch.round(bias / scale_bias)
+                        bias_q = torch.clamp(bias_q, -128, 127)
+                        bias_dequant = bias_q * scale_bias
+                        module.bias.data = bias_dequant
+
+                num_quantized += 1
+
+    if verbose:
+        print(f"  ✓ Quantized {num_quantized} Linear layers to INT8 precision")
+        print(f"  ✓ Running on CUDA (simulated INT8 compute)")
+
+
 def load_model(
     model_name: str = "distilbert-base-uncased-finetuned-sst-2-english",
     precision: str = "fp32",
@@ -92,14 +149,27 @@ def load_model(
         model = model.to(device)
 
     elif precision == "int8":
-        # Apply dynamic quantization (INT8)
-        # This quantizes Linear layers to INT8 while keeping other operations in FP32
-        model = torch.quantization.quantize_dynamic(
-            model,
-            {nn.Linear},  # Quantize Linear layers
-            dtype=torch.qint8
-        )
-        model = model.to(device)
+        # For CUDA: Use manual INT8 conversion with fake quantization
+        # This simulates INT8 by quantizing weights to int8 range but keeps computation in FP32/FP16
+        if device == "cuda":
+            if verbose:
+                print("  Using CUDA-compatible INT8 (simulated quantization)")
+
+            # Move model to CUDA first
+            model = model.to(device)
+
+            # Apply simulated INT8 quantization to Linear layers
+            _apply_int8_quantization_cuda(model, verbose=verbose)
+        else:
+            # For CPU: Use PyTorch's dynamic quantization
+            if verbose:
+                print("  Using CPU dynamic quantization")
+            model = torch.quantization.quantize_dynamic(
+                model,
+                {nn.Linear},
+                dtype=torch.qint8
+            )
+            model = model.to("cpu")
 
     model.eval()
 

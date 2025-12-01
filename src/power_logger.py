@@ -122,13 +122,13 @@ class PowerLogger:
             print(f"Starting power logger: {' '.join(cmd)}")
 
         # Use unbuffered output for immediate line reading
+        # Set bufsize=0 for unbuffered binary mode, then decode ourselves
         self.process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,  # Line buffered
-            universal_newlines=True
+            text=False,  # Binary mode for no buffering
+            bufsize=0,   # Completely unbuffered
         )
 
         # Start reader thread
@@ -150,6 +150,7 @@ class PowerLogger:
         Background thread that reads power samples from nvidia-smi.
 
         This runs continuously until stop() is called.
+        Reads in binary mode to avoid buffering issues.
         """
         if self.process is None or self.process.stdout is None:
             if self.verbose:
@@ -157,30 +158,41 @@ class PowerLogger:
             return
 
         try:
-            for line in iter(self.process.stdout.readline, ''):
-                if not self.is_running:
+            buffer = b""
+            while self.is_running:
+                # Read one byte at a time to avoid blocking
+                chunk = self.process.stdout.read(1)
+
+                if not chunk:
+                    # Process ended
                     break
 
-                line = line.strip()
-                if not line:
-                    continue
+                buffer += chunk
 
-                try:
-                    power = float(line)
-                    with self._lock:
-                        self.samples.append(power)
+                # Check for newline
+                if chunk == b'\n':
+                    line = buffer.decode('utf-8', errors='ignore').strip()
+                    buffer = b""  # Reset buffer
 
-                    if self.verbose and len(self.samples) % 10 == 0:
-                        print(f"  Power samples collected: {len(self.samples)}")
+                    if not line:
+                        continue
 
-                except ValueError:
-                    # Check if this is an error message
-                    if "error" in line.lower() or "warning" in line.lower():
-                        if self.verbose:
-                            print(f"  nvidia-smi message: {line}")
-                    elif self.verbose:
-                        print(f"  Warning: Could not parse power value: {line}")
-                    continue
+                    try:
+                        power = float(line)
+                        with self._lock:
+                            self.samples.append(power)
+
+                        if self.verbose and len(self.samples) % 10 == 0:
+                            print(f"  Power samples collected: {len(self.samples)}")
+
+                    except ValueError:
+                        # Check if this is an error message
+                        if "error" in line.lower() or "warning" in line.lower():
+                            if self.verbose:
+                                print(f"  nvidia-smi message: {line}")
+                        elif self.verbose:
+                            print(f"  Warning: Could not parse power value: {line}")
+                        continue
 
         except Exception as e:
             if self.verbose:
