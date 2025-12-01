@@ -92,7 +92,7 @@ class PowerLogger:
         """
         Start power logging in background.
 
-        Spawns nvidia-smi subprocess that continuously logs power draw.
+        Uses manual polling approach to avoid buffering issues.
 
         Raises:
             RuntimeError: If logger is already running
@@ -104,90 +104,67 @@ class PowerLogger:
             self.samples = []
             self.is_running = True
 
-        # Start nvidia-smi in continuous mode
-        # Note: Kaggle doesn't support -lms flag, so we use -l with seconds
-        # Convert milliseconds to seconds for the -l flag
-        loop_interval_seconds = self.sample_interval_ms / 1000.0
-
-        # Use stdbuf to force line-buffered output from nvidia-smi
-        # This prevents output buffering that causes sample loss
-        cmd = [
-            "stdbuf", "-oL",  # Force line-buffered output
-            "nvidia-smi",
-            "--query-gpu=power.draw",
-            "--format=csv,noheader,nounits",
-            f"--id={self.gpu_id}",
-            "-l",  # Loop flag (takes seconds as next argument)
-            str(loop_interval_seconds)  # Interval in seconds (e.g., "0.1" for 100ms)
-        ]
+        # We don't start a continuous nvidia-smi process anymore
+        # Instead, the reader thread will poll nvidia-smi directly
+        self.process = None  # Not used with manual polling
 
         if self.verbose:
-            print(f"Starting power logger: {' '.join(cmd)}")
+            print(f"Starting power logger with manual polling (interval: {self.sample_interval_ms} ms)")
 
-        # Use unbuffered output for immediate line reading
-        # Set bufsize=0 for unbuffered binary mode, then decode ourselves
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False,  # Binary mode for no buffering
-            bufsize=0,   # Completely unbuffered
-        )
-
-        # Start reader thread
+        # Start reader thread (will poll nvidia-smi)
         self._reader_thread = threading.Thread(target=self._read_samples, daemon=True)
         self._reader_thread.start()
-
-        # Give it a moment to start and check for immediate errors
-        time.sleep(0.1)
-        if self.process.poll() is not None:
-            # Process died immediately
-            stderr_output = self.process.stderr.read() if self.process.stderr else ""
-            raise RuntimeError(f"nvidia-smi process failed immediately. stderr: {stderr_output}")
 
         if self.verbose:
             print(f" Power logger started (interval: {self.sample_interval_ms} ms)")
 
     def _read_samples(self) -> None:
         """
-        Background thread that reads power samples from nvidia-smi.
+        Background thread that polls nvidia-smi periodically.
 
         This runs continuously until stop() is called.
-        Uses iter() with readline for non-blocking reads.
+        Uses manual polling to avoid buffering issues with continuous mode.
         """
-        if self.process is None or self.process.stdout is None:
-            if self.verbose:
-                print("  Warning: Process or stdout is None in reader thread")
-            return
+        poll_interval = self.sample_interval_ms / 1000.0  # Convert to seconds
 
         try:
-            # Use iter() to read lines as they become available
-            # This is more efficient than byte-by-byte reading
-            for line_bytes in iter(self.process.stdout.readline, b''):
-                if not self.is_running:
-                    break
-
-                line = line_bytes.decode('utf-8', errors='ignore').strip()
-
-                if not line:
-                    continue
-
+            while self.is_running:
                 try:
-                    power = float(line)
-                    with self._lock:
-                        self.samples.append(power)
+                    # Poll nvidia-smi directly (no continuous mode)
+                    result = subprocess.run(
+                        [
+                            "nvidia-smi",
+                            "--query-gpu=power.draw",
+                            "--format=csv,noheader,nounits",
+                            f"--id={self.gpu_id}"
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=2
+                    )
 
-                    if self.verbose and len(self.samples) % 10 == 0:
-                        print(f"  Power samples collected: {len(self.samples)}")
+                    if result.returncode == 0:
+                        line = result.stdout.strip()
+                        try:
+                            power = float(line)
+                            with self._lock:
+                                self.samples.append(power)
 
-                except ValueError:
-                    # Check if this is an error message
-                    if "error" in line.lower() or "warning" in line.lower():
-                        if self.verbose:
-                            print(f"  nvidia-smi message: {line}")
-                    elif self.verbose:
-                        print(f"  Warning: Could not parse power value: {line}")
-                    continue
+                            if self.verbose and len(self.samples) % 100 == 0:
+                                print(f"  Power samples collected: {len(self.samples)}")
+                        except ValueError:
+                            if self.verbose:
+                                print(f"  Warning: Could not parse power value: {line}")
+
+                except subprocess.TimeoutExpired:
+                    if self.verbose:
+                        print("  Warning: nvidia-smi polling timeout")
+                except Exception as e:
+                    if self.verbose:
+                        print(f"  Warning: nvidia-smi poll error: {e}")
+
+                # Sleep until next sample
+                time.sleep(poll_interval)
 
         except Exception as e:
             if self.verbose:
@@ -198,7 +175,7 @@ class PowerLogger:
 
     def stop(self) -> None:
         """
-        Stop power logging and terminate nvidia-smi subprocess.
+        Stop power logging and wait for reader thread to finish.
 
         Raises:
             RuntimeError: If logger is not running
@@ -209,18 +186,9 @@ class PowerLogger:
 
             self.is_running = False
 
-        # Terminate the subprocess
-        if self.process is not None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
-
-        # Wait for reader thread to finish
+        # Wait for reader thread to finish (no subprocess to terminate with polling)
         if hasattr(self, '_reader_thread'):
-            self._reader_thread.join(timeout=1)
+            self._reader_thread.join(timeout=2)
 
         if self.verbose:
             print(f" Power logger stopped ({len(self.samples)} samples collected)")
