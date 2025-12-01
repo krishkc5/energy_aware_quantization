@@ -105,14 +105,17 @@ class PowerLogger:
             self.is_running = True
 
         # Start nvidia-smi in continuous mode
-        # Format: CSV with no header, no units, sampling every N milliseconds
-        # CRITICAL: -lms flag must be a single argument with value, not two arguments
+        # Note: Kaggle doesn't support -lms flag, so we use -l with seconds
+        # Convert milliseconds to seconds for the -l flag
+        loop_interval_seconds = self.sample_interval_ms / 1000.0
+
         cmd = [
             "nvidia-smi",
             "--query-gpu=power.draw",
             "--format=csv,noheader,nounits",
             f"--id={self.gpu_id}",
-            f"-lms{self.sample_interval_ms}"  # Loop with millisecond interval (no space!)
+            "-l",  # Loop flag (takes seconds as next argument)
+            str(loop_interval_seconds)  # Interval in seconds (e.g., "0.1" for 100ms)
         ]
 
         if self.verbose:
