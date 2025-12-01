@@ -106,28 +106,38 @@ class PowerLogger:
 
         # Start nvidia-smi in continuous mode
         # Format: CSV with no header, no units, sampling every N milliseconds
+        # CRITICAL: -lms flag must be a single argument with value, not two arguments
         cmd = [
             "nvidia-smi",
             "--query-gpu=power.draw",
             "--format=csv,noheader,nounits",
             f"--id={self.gpu_id}",
-            f"-lms {self.sample_interval_ms}"  # Loop with millisecond interval
+            f"-lms{self.sample_interval_ms}"  # Loop with millisecond interval (no space!)
         ]
 
         if self.verbose:
             print(f"Starting power logger: {' '.join(cmd)}")
 
+        # Use unbuffered output for immediate line reading
         self.process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            bufsize=1
+            bufsize=1,  # Line buffered
+            universal_newlines=True
         )
 
         # Start reader thread
         self._reader_thread = threading.Thread(target=self._read_samples, daemon=True)
         self._reader_thread.start()
+
+        # Give it a moment to start and check for immediate errors
+        time.sleep(0.1)
+        if self.process.poll() is not None:
+            # Process died immediately
+            stderr_output = self.process.stderr.read() if self.process.stderr else ""
+            raise RuntimeError(f"nvidia-smi process failed immediately. stderr: {stderr_output}")
 
         if self.verbose:
             print(f" Power logger started (interval: {self.sample_interval_ms} ms)")
@@ -139,28 +149,42 @@ class PowerLogger:
         This runs continuously until stop() is called.
         """
         if self.process is None or self.process.stdout is None:
+            if self.verbose:
+                print("  Warning: Process or stdout is None in reader thread")
             return
 
-        for line in iter(self.process.stdout.readline, ''):
-            if not self.is_running:
-                break
+        try:
+            for line in iter(self.process.stdout.readline, ''):
+                if not self.is_running:
+                    break
 
-            line = line.strip()
-            if not line:
-                continue
+                line = line.strip()
+                if not line:
+                    continue
 
-            try:
-                power = float(line)
-                with self._lock:
-                    self.samples.append(power)
+                try:
+                    power = float(line)
+                    with self._lock:
+                        self.samples.append(power)
 
-                if self.verbose and len(self.samples) % 10 == 0:
-                    print(f"  Power samples collected: {len(self.samples)}")
+                    if self.verbose and len(self.samples) % 10 == 0:
+                        print(f"  Power samples collected: {len(self.samples)}")
 
-            except ValueError:
-                if self.verbose:
-                    print(f"  Warning: Could not parse power value: {line}")
-                continue
+                except ValueError:
+                    # Check if this is an error message
+                    if "error" in line.lower() or "warning" in line.lower():
+                        if self.verbose:
+                            print(f"  nvidia-smi message: {line}")
+                    elif self.verbose:
+                        print(f"  Warning: Could not parse power value: {line}")
+                    continue
+
+        except Exception as e:
+            if self.verbose:
+                print(f"  Error in power reader thread: {e}")
+            import traceback
+            if self.verbose:
+                traceback.print_exc()
 
     def stop(self) -> None:
         """
@@ -251,6 +275,69 @@ class PowerLogger:
         if self.is_running:
             self.stop()
         return False
+
+
+def estimate_power_from_single_sample(
+    gpu_id: int = 0,
+    num_samples: int = 10,
+    interval_ms: int = 100
+) -> List[float]:
+    """
+    Estimate power by taking discrete samples (fallback for continuous monitoring).
+
+    This is a fallback when continuous nvidia-smi monitoring fails (e.g., on Kaggle).
+    Takes multiple discrete samples over a short period.
+
+    Args:
+        gpu_id: GPU device ID
+        num_samples: Number of samples to take
+        interval_ms: Interval between samples in milliseconds
+
+    Returns:
+        List of power samples in Watts
+    """
+    import subprocess
+    import time
+
+    samples = []
+    interval_sec = interval_ms / 1000.0
+
+    print(f"  Taking {num_samples} discrete power samples (fallback mode)...")
+
+    for i in range(num_samples):
+        try:
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=power.draw",
+                    "--format=csv,noheader,nounits",
+                    f"--id={gpu_id}"
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+
+            if result.returncode == 0:
+                power = float(result.stdout.strip())
+                samples.append(power)
+
+                if (i + 1) % 3 == 0:
+                    print(f"    Sampled {i+1}/{num_samples}: {power:.2f} W")
+
+            time.sleep(interval_sec)
+
+        except Exception as e:
+            print(f"  Warning: Sample {i+1} failed: {e}")
+            continue
+
+    if len(samples) > 0:
+        print(f"  ✓ Collected {len(samples)} power samples")
+        print(f"    Mean power: {np.mean(samples):.2f} W")
+    else:
+        print(f"  ⚠️  Failed to collect any power samples")
+
+    return samples
 
 
 def validate_power_samples(
