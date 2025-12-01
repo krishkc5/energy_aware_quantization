@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.ipynb_checkpoints/
+
+# model weights and datasets
+datasets/*.pt
+models/*.pt
+
+# logs
+*.log
+logs/
+
+# results
+results/
