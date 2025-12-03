@@ -6,14 +6,57 @@ in different precision formats for energy measurement.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from transformers import (
-    AutoModelForSequenceClassification,
-    AutoConfig,
-)
+from torch.ao.quantization import QuantStub, DeQuantStub
+from transformers import AutoConfig, AutoModelForSequenceClassification
+
+from models.QuantWrapper import QuantDistilBertWrapper
+
+
+import torch
+import torch.nn as nn
+from torch.ao.quantization import QuantStub, DeQuantStub
+
+class QuantDistilBertWrapper(nn.Module):
+    """
+    Wrap a DistilBERT classification model with Quant/DeQuant stubs
+    so we can use static PTQ (prepare/convert) like in Lab 3.
+    """
+    def __init__(self, base_model: nn.Module):
+        super().__init__()
+        self.quant = QuantStub()
+        self.dequant = DeQuantStub()
+        self.model = base_model  # usually AutoModelForSequenceClassification
+
+    def forward(self, input_ids, attention_mask=None, **kwargs):
+        """
+        Quantization-aware forward that stays compatible with the
+        HuggingFace output shape expected elsewhere in the project.
+        """
+        # Quantize token IDs before embedding lookup
+        x = self.quant(input_ids)
+
+        # Use DistilBERT embeddings on the quantized IDs, then run the model
+        embeddings = self.model.distilbert.embeddings(x)
+        outputs = self.model(
+            inputs_embeds=embeddings,
+            attention_mask=attention_mask,
+            **kwargs,
+        )
+
+        # Dequantize logits before returning
+        logits = self.dequant(outputs.logits)
+
+        # Return an object with `.logits` so existing code keeps working
+        class OutputWrapper:
+            def __init__(self, logits_tensor):
+                self.logits = logits_tensor
+
+        return OutputWrapper(logits)
+
 
 
 @dataclass
@@ -23,6 +66,61 @@ class ModelConfig:
     precision: str  # "fp32", "fp16", "int8"
     device: str = "cuda"
     num_labels: int = 2
+
+
+@dataclass
+class LayerwiseQuantConfig:
+    """
+    Configuration for hybrid precision per layer.
+
+    `layer_precision` maps a substring (matching module names) to a
+    desired precision: "fp32", "fp16", or "int8".
+      - "int8"  -> attach qconfig so the module is statically quantized
+      - "fp32"/"fp16" -> clear qconfig so the module stays in float
+
+    Example:
+        LayerwiseQuantConfig(
+            layer_precision={
+                "attention": "int8",
+                "ffn": "int8",
+                "classifier": "fp32",
+            }
+        )
+    """
+
+    layer_precision: Dict[str, str]
+
+
+def apply_layerwise_qconfig(
+    model: nn.Module,
+    qconfig: torch.ao.quantization.QConfig,
+    cfg: LayerwiseQuantConfig,
+) -> None:
+    """
+    Attach qconfig selectively to DistilBERT submodules.
+
+    This is a simple heuristic based on layer-name substrings. It lets
+    you implement hybrid schemes (e.g., INT8 attention + FP32 classifier).
+    """
+    for name, module in model.named_modules():
+        # Skip explicit quant/dequant stubs themselves
+        if isinstance(module, (QuantStub, DeQuantStub)):
+            continue
+
+        matched_precision: Optional[str] = None
+        for pattern, prec in cfg.layer_precision.items():
+            if pattern in name:
+                matched_precision = prec
+
+        if matched_precision is None:
+            # No explicit rule -> leave whatever global qconfig is set
+            continue
+
+        if matched_precision.lower() == "int8":
+            module.qconfig = qconfig
+        else:
+            # Any non-int8 precision means "keep this layer in float"
+            module.qconfig = None
 
 
 def _apply_int8_quantization_cuda(model: nn.Module, verbose: bool = True) -> None:
@@ -87,7 +185,8 @@ def load_model(
     precision: str = "fp32",
     device: str = "cuda",
     num_labels: int = 2,
-    verbose: bool = True
+    verbose: bool = True,
+    layerwise_cfg: Optional[LayerwiseQuantConfig] = None,
 ) -> nn.Module:
     """
     Load a transformer model in specified precision.
@@ -149,8 +248,11 @@ def load_model(
         model = model.to(device)
 
     elif precision == "int8":
-        # For CUDA: Use manual INT8 conversion with fake quantization
-        # This simulates INT8 by quantizing weights to int8 range but keeps computation in FP32/FP16
+        # Two paths for INT8:
+        #   - CUDA: keep the existing "simulated INT8" path to stay
+        #           compatible with the original project harness.
+        #   - CPU:  use static PTQ with QuantDistilBertWrapper, qconfig,
+        #           prepare + calibration + convert (like Lab 3).
         if device == "cuda":
             if verbose:
                 print("  Using CUDA-compatible INT8 (simulated quantization)")
@@ -161,15 +263,51 @@ def load_model(
             # Apply simulated INT8 quantization to Linear layers
             _apply_int8_quantization_cuda(model, verbose=verbose)
         else:
-            # For CPU: Use PyTorch's dynamic quantization
+            # Static PTQ on CPU using wrapper + qconfig + prepare/convert
             if verbose:
-                print("  Using CPU dynamic quantization")
-            model = torch.quantization.quantize_dynamic(
-                model,
-                {nn.Linear},
-                dtype=torch.qint8
-            )
-            model = model.to("cpu")
+                print("  Using CPU static PTQ with QuantDistilBertWrapper")
+
+            # Wrap the HF model with Quant/DeQuant stubs
+            wrapped = QuantDistilBertWrapper(model)
+
+            # Default to a global qconfig if none is provided
+            qconfig = torch.ao.quantization.get_default_qconfig("fbgemm")
+
+            if layerwise_cfg is not None:
+                # Attach qconfig selectively to attention / FFN / classifier
+                apply_layerwise_qconfig(wrapped, qconfig, layerwise_cfg)
+            else:
+                # Global qconfig (all eligible modules)
+                wrapped.qconfig = qconfig
+
+            if verbose:
+                print("  Preparing model for static quantization...")
+
+            prepared = torch.ao.quantization.prepare(wrapped, inplace=False)
+            prepared.eval()
+
+            # Lightweight calibration with random token IDs.
+            # This is intentionally simple; the main project harness
+            # still uses the high-quality FP32/FP16 paths on GPU.
+            vocab_size = getattr(config, "vocab_size", 30522)
+            seq_len = getattr(config, "max_position_embeddings", 128)
+
+            with torch.no_grad():
+                for _ in range(10):
+                    dummy_ids = torch.randint(
+                        low=0,
+                        high=vocab_size,
+                        size=(8, seq_len),
+                        dtype=torch.long,
+                    )
+                    dummy_mask = torch.ones_like(dummy_ids)
+                    _ = prepared(input_ids=dummy_ids, attention_mask=dummy_mask)
+
+            if verbose:
+                print("  Converting calibrated model to INT8...")
+
+            quantized = torch.ao.quantization.convert(prepared, inplace=False)
+            model = quantized.to("cpu")
 
     model.eval()
 
