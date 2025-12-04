@@ -1,0 +1,9 @@
+{
+  "num_samples": 1940,
+  "max_length": 128,
+  "dataset_name": "wikitext-2",
+  "model": "gpt2",
+  "task": "language_modeling",
+  "seed": 42,
+  "tokenizer": "gpt2"
+}
