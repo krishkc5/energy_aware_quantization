@@ -1,8 +1,0 @@
-{
-  "num_samples": 100,
-  "max_length": 128,
-  "dataset_name": "sst2",
-  "num_labels": 2,
-  "seed": 42,
-  "tokenizer": "distilbert-base-uncased"
-}
